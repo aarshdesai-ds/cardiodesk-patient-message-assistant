@@ -1,0 +1,13 @@
+langchain
+langchain-openai
+langchain-text-splitters
+langchain-core
+langchain-community
+python-dotenv
+chromadb
+beautifulsoup4
+langchain-chroma
+fastapi
+uvicorn
+streamlit 
+requests

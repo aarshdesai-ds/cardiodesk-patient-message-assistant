@@ -1,0 +1,10 @@
+from pydantic import BaseModel, Field
+from typing import Literal
+
+class MessageAnalysis(BaseModel):
+
+    topic: str = Field(..., description= "the heart condition or subject the message is about, in a few words (e.g. 'atrial fibrillation', 'blood pressure', 'prescription refill'); 'general' if none is clear")
+    intent: Literal["symptom_report", "medication_question", "education_question", "admin_request"] = Field(..., description="the real reason behind the patient's message. For eg, symptom_report: the patient describes something they are feeling or a reading they took, medication_question: about taking, combining, stopping or side effects of a medicine or supplement, education_question: wants to understand a condition, a test or a term; no symptom of their own described, admin_request: appointments, refills, forms, the portal, opening hours. If a message fits more than one, a described symptom always wins: 'I feel dizzy since starting my new tablets' is a symptom_report, not a medication question.")
+    red_flags: list[str] = Field(..., description="warning signs the patient says they are experiencing, each as a short phrase in their own words; an empty list if none. List a warning sign only when the patient reports experiencing it, not when they're asking about it in general.")
+    urgency: Literal["emergency", "urgent", "routine"] = Field(... , description= "The urgency of the issue discussed in the message. For e.g, emergency: the patient describes symptoms happening NOW that could be life-threatening, such as chest pain or pressure, severe trouble breathing, fainting, signs of a stroke, or a blood pressure reading above 180/120. Urgent: new or worsening symptoms that need attention the same day, but are not immediately life-threatening. routine: questions, admin requests, or stable long-standing symptoms. When unsure between two levels, choose the more urgent one.")
+    patient_name: str = Field(... , description= "the patient's name if they signed the message; an empty string if not")
