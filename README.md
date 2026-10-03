@@ -17,6 +17,7 @@ A retrieval-augmented (RAG) assistant that triages patient portal messages for a
 - [Requirements](#requirements)
 - [How to Run](#how-to-run)
 - [Results Summary](#results-summary)
+- [Evaluation](#evaluation)
 - [Known Limitations](#known-limitations)
 - [Ideas for Extension](#ideas-for-extension)
 - [Data Source](#data-source)
@@ -194,7 +195,12 @@ cardiodesk-patient-message-assistant/
 ├── prompts.py              # Analysis, summary, three reply prompts, follow-up prompt
 ├── chains.py               # triage_chain and followup_chain
 ├── api.py                  # FastAPI service
-└── app.py                  # Streamlit interface
+├── app.py                  # Streamlit interface
+│
+├── evaluate.py             # Runs the labelled test set and reports the results
+└── eval/
+    ├── messages.jsonl      # 54 labelled synthetic messages
+    └── results.csv         # Per-message results from the last run
 ```
 
 ---
@@ -290,13 +296,83 @@ What the drafts did:
 
 The API rejects empty, missing and oversized input, and unknown chat roles, with a 422 response before any model call.
 
-This is a small, hand-checked test set. It shows the paths work as designed. It is not a measure of accuracy.
+This is a small, hand-checked test set. It shows the paths work as designed. It is not a measure of accuracy. The next section covers a larger, labelled set.
+
+---
+
+## Evaluation
+
+`evaluate.py` runs the triage chain over 54 labelled synthetic messages in `eval/messages.jsonl` and compares each result with its label. Per-message results are saved to `eval/results.csv`.
+
+```bash
+python evaluate.py
+```
+
+### The test set
+
+| Group | Messages | What it tests |
+|---|---|---|
+| `emergency_rules` | 8 | Emergencies that contain a phrase from the rule list |
+| `emergency_model_only` | 8 | Emergencies worded so that no phrase matches (readings, stroke signs, "an elephant sitting on my chest") |
+| `false_alarm_bait` | 6 | Non-emergencies that contain a phrase ("I have not had any chest pain") |
+| `urgent_not_emergency` | 6 | Symptoms that need a same-day call, not emergency services |
+| `routine_symptom` | 4 | Stable, long-standing symptoms |
+| `medication` | 7 | Questions about medicines and supplements |
+| `education` | 7 | General questions about heart conditions |
+| `admin` | 7 | Appointments, refills and portal use |
+| `out_of_scope` | 1 | A question unrelated to the heart |
+
+Each message is labelled with whether it is an emergency, which intents are acceptable, and (where it applies) a source that should appear among those retrieved.
+
+### Safety check
+
+| | Result |
+|---|---|
+| Emergencies caught | **16 of 16** |
+| Emergencies missed | **0** |
+| False alarms | 6 of 38, all six in the `false_alarm_bait` group |
+| False alarms outside that group | 0 of 32 |
+
+How the 16 emergencies were caught:
+
+| Flagged by | Count |
+|---|---|
+| Rules and model | 5 |
+| Rules only | 3 |
+| Model only | 8 |
+
+Taken alone, the rules would have caught 8 of 16 and the model 13 of 16. **Neither layer was enough without the other.**
+
+- **Rules only (3).** The model rated these below emergency: fainting in the shower "but okay now", struggling to breathe while sitting still, and blacking out twice in two days. The phrase rules caught all three.
+- **Model only (8).** No phrase matched: two blood pressure readings in the crisis range, two descriptions of stroke signs, a collapse, two unusual descriptions of chest pain, and "can’t breathe" typed with a curly apostrophe, which the phrase list does not match.
+- **False alarms (6).** All were raised by the rules alone, on negated or historical phrases. The model read each one as a non-emergency. These are accepted by design: the fixed message begins "If you are having these symptoms now…", and the cost is an earlier look from a nurse.
+
+### Intent and retrieval
+
+| Check | Result |
+|---|---|
+| Intent matched an acceptable label | 53 of 54 |
+| Expected source among those retrieved | 29 of 31 checked |
+
+Retrieval is checked only for messages that took the normal path and have an expected source.
+
+- **Intent miss (1).** A message about long-standing ankle swelling that asked what to mention at the next visit was classified as `education_question`, not `symptom_report`. The reading is defensible, and the label is borderline.
+- **Retrieval miss (1 of 2).** The same message. Its intent selected the education-only search, so no clinic policy was retrieved. This follows from the intent, not from the search.
+- **Retrieval miss (2 of 2).** The ashwagandha question retrieved the heart failure page, but the clinic policy chunks were about appointments and when to get help, not prescriptions. The knowledge base has nothing on supplements.
+
+### What this evaluation does not show
+
+- **The set is small.** Zero misses in 16 emergencies does not mean a miss rate of zero. With this sample size, a true miss rate as high as about 17% cannot be ruled out.
+- **The messages are synthetic** and were written by the same person who knew the phrase list. The `emergency_rules` group matches the rules by construction, so its 8 of 8 is expected. The informative results are the model-only group and the three rules-only catches.
+- **One run.** The model is set to temperature 0, but results can still vary slightly between runs.
+- **Reply quality is not measured.** The evaluation checks routing and retrieved sources. It does not check whether a drafted reply is accurate or stays within its sources.
 
 ---
 
 ## Known Limitations
 
-- **No systematic evaluation.** Seven hand-checked messages is far too few to make claims about accuracy or safety.
+- **A small, synthetic evaluation.** 54 labelled messages, written by the project's author, is enough to compare the two safety layers but too few to make claims about accuracy or safety in real use. Reply quality is not evaluated.
+- **The model under-rated three emergencies.** Fainting, breathlessness at rest and repeated blackouts were caught by the phrase rules only. Without the rules they would have gone to the normal reply path.
 - **Phrase rules are literal.** They produce false alarms on negated phrases, and they miss wording that is not on the list. A message typed with a curly apostrophe ("can’t breathe") does not match the phrase "can't breathe" unless the text is normalised first.
 - **Blood pressure numbers rely on the model.** No rule checks readings; the 190/125 message was caught only by the model's urgency rating.
 - **The "only the sources" rule is not perfectly followed.** One draft named aspirin as a specific interaction, which the retrieved text did not state. Another did not say plainly that the materials did not cover the question.
@@ -309,8 +385,8 @@ This is a small, hand-checked test set. It shows the paths work as designed. It 
 
 ## Ideas for Extension
 
-### 1. A proper evaluation set
-Write 50 or more synthetic messages with expected intent, urgency, path and sources, and report how often each is right. For the safety check, report missed emergencies and false alarms separately.
+### 1. A harder evaluation set
+Add messages written without reference to the phrase list: misspellings, indirect wording, and messages written by someone else. Add a check of reply quality, such as whether each draft stays within its retrieved sources.
 
 ### 2. A rule for blood pressure readings
 Detect readings written as two numbers with a slash, and flag those above the crisis values given on the MedlinePlus page. This would give the 190/125 case a rule-based check as well as the model's.
