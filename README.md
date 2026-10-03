@@ -232,7 +232,7 @@ An OpenAI API key is required. The project uses `gpt-4o-mini` for analysis and d
 
 1. Clone the repository and create a virtual environment:
    ```bash
-   git clone https://github.com/YOUR-USERNAME/cardiodesk-patient-message-assistant.git
+   git clone https://github.com/aarshdesai-ds/cardiodesk-patient-message-assistant.git
    cd cardiodesk-patient-message-assistant
    python -m venv venv
    venv\Scripts\activate
