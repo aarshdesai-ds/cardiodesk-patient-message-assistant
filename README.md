@@ -313,7 +313,7 @@ python evaluate.py
 | Group | Messages | What it tests |
 |---|---|---|
 | `emergency_rules` | 8 | Emergencies that contain a phrase from the rule list |
-| `emergency_model_only` | 8 | Emergencies worded so that no phrase matches (readings, stroke signs, "an elephant sitting on my chest") |
+| `emergency_model_only` | 8 | Emergencies worded so that no phrase matches (readings, stroke signs, "an elephant sitting on my chest"). One of the eight now matches a phrase, after the apostrophe fix described below. |
 | `false_alarm_bait` | 6 | Non-emergencies that contain a phrase ("I have not had any chest pain") |
 | `urgent_not_emergency` | 6 | Symptoms that need a same-day call, not emergency services |
 | `routine_symptom` | 4 | Stable, long-standing symptoms |
@@ -337,14 +337,15 @@ How the 16 emergencies were caught:
 
 | Flagged by | Count |
 |---|---|
-| Rules and model | 5 |
+| Rules and model | 6 |
 | Rules only | 3 |
-| Model only | 8 |
+| Model only | 7 |
 
-Taken alone, the rules would have caught 8 of 16 and the model 13 of 16. **Neither layer was enough without the other.**
+Taken alone, the rules would have caught 9 of 16 and the model 13 of 16. **Neither layer was enough without the other.**
 
 - **Rules only (3).** The model rated these below emergency: fainting in the shower "but okay now", struggling to breathe while sitting still, and blacking out twice in two days. The phrase rules caught all three.
-- **Model only (8).** No phrase matched: two blood pressure readings in the crisis range, two descriptions of stroke signs, a collapse, two unusual descriptions of chest pain, and "can’t breathe" typed with a curly apostrophe, which the phrase list does not match.
+- **Model only (7).** No phrase matched: two blood pressure readings in the crisis range, two descriptions of stroke signs, a collapse, and two unusual descriptions of chest pain.
+- **A gap the evaluation found and fixed.** In the first run, a message with "can’t breathe" typed with a curly apostrophe did not match the phrase "can't breathe", and only the model caught it (rules and model 5, model only 8). `safety.py` now converts curly apostrophes before matching, and both layers catch that message. The figures above are from the run after the fix.
 - **False alarms (6).** All were raised by the rules alone, on negated or historical phrases. The model read each one as a non-emergency. These are accepted by design: the fixed message begins "If you are having these symptoms now…", and the cost is an earlier look from a nurse.
 
 ### Intent and retrieval
@@ -352,19 +353,19 @@ Taken alone, the rules would have caught 8 of 16 and the model 13 of 16. **Neith
 | Check | Result |
 |---|---|
 | Intent matched an acceptable label | 53 of 54 |
-| Expected source among those retrieved | 29 of 31 checked |
+| Expected source among those retrieved | 29 to 30 of 31 checked, across two runs |
 
 Retrieval is checked only for messages that took the normal path and have an expected source.
 
 - **Intent miss (1).** A message about long-standing ankle swelling that asked what to mention at the next visit was classified as `education_question`, not `symptom_report`. The reading is defensible, and the label is borderline.
-- **Retrieval miss (1 of 2).** The same message. Its intent selected the education-only search, so no clinic policy was retrieved. This follows from the intent, not from the search.
-- **Retrieval miss (2 of 2).** The ashwagandha question retrieved the heart failure page, but the clinic policy chunks were about appointments and when to get help, not prescriptions. The knowledge base has nothing on supplements.
+- **Retrieval miss, in both runs.** The same message. Its intent selected the education-only search, so no clinic policy was retrieved. This follows from the intent, not from the search.
+- **Retrieval miss, in one run of two.** The ashwagandha question retrieved the heart failure page in both runs. In the first, the clinic policy chunks were about appointments and when to get help; in the second, the prescriptions policy was found. The search query is built from the model's analysis and summary, which can be worded slightly differently each run. The knowledge base has nothing on supplements, so this case is borderline.
 
 ### What this evaluation does not show
 
 - **The set is small.** Zero misses in 16 emergencies does not mean a miss rate of zero. With this sample size, a true miss rate as high as about 17% cannot be ruled out.
 - **The messages are synthetic** and were written by the same person who knew the phrase list. The `emergency_rules` group matches the rules by construction, so its 8 of 8 is expected. The informative results are the model-only group and the three rules-only catches.
-- **One run.** The model is set to temperature 0, but results can still vary slightly between runs.
+- **Two runs only.** The model is set to temperature 0, but results still vary slightly: the two runs differed by one retrieval result. The safety, intent and path results were the same in both.
 - **Reply quality is not measured.** The evaluation checks routing and retrieved sources. It does not check whether a drafted reply is accurate or stays within its sources.
 
 ---
@@ -373,7 +374,7 @@ Retrieval is checked only for messages that took the normal path and have an exp
 
 - **A small, synthetic evaluation.** 54 labelled messages, written by the project's author, is enough to compare the two safety layers but too few to make claims about accuracy or safety in real use. Reply quality is not evaluated.
 - **The model under-rated three emergencies.** Fainting, breathlessness at rest and repeated blackouts were caught by the phrase rules only. Without the rules they would have gone to the normal reply path.
-- **Phrase rules are literal.** They produce false alarms on negated phrases, and they miss wording that is not on the list. A message typed with a curly apostrophe ("can’t breathe") does not match the phrase "can't breathe" unless the text is normalised first.
+- **Phrase rules are literal.** They produce false alarms on negated phrases, and they miss wording that is not on the list, including misspellings.
 - **Blood pressure numbers rely on the model.** No rule checks readings; the 190/125 message was caught only by the model's urgency rating.
 - **The "only the sources" rule is not perfectly followed.** One draft named aspirin as a specific interaction, which the retrieved text did not state. Another did not say plainly that the materials did not cover the question.
 - **The `red_flags` field can include ordinary symptoms**, such as tiredness on a routine message. It does not affect the safety check, which uses the phrase rules and the urgency field.
@@ -391,8 +392,8 @@ Add messages written without reference to the phrase list: misspellings, indirec
 ### 2. A rule for blood pressure readings
 Detect readings written as two numbers with a slash, and flag those above the crisis values given on the MedlinePlus page. This would give the 190/125 case a rule-based check as well as the model's.
 
-### 3. Normalise text before the phrase rules
-Convert curly apostrophes and similar characters before matching, and add everyday wordings found during testing.
+### 3. Widen the phrase rules
+Add everyday wordings and common misspellings found during testing. Curly apostrophes are already converted before matching.
 
 ### 4. Checked citations
 Have the model cite chunk IDs, and verify in code that each cited ID was actually retrieved.

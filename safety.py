@@ -5,7 +5,7 @@ RED_FLAG_PHRASES = ["chest pain", "chest pressure", "pressure in my chest", "tig
 
 def find_red_flags(message):
     flags = []
-    message = message.lower()
+    message = message.lower().replace("\u2019","'")
     for phrase in RED_FLAG_PHRASES:
         if phrase in message:
             flags.append(phrase)
