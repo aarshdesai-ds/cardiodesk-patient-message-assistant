@@ -30,6 +30,14 @@ PATH_LABELS = {
     "info_reply": "Information reply",
 }
 
+TOOL_LABELS = {
+    "classify_bp": "Blood pressure category check",
+    "check_red_flags": "Emergency phrase check",
+    "search_knowledge_base[education]": "Knowledge base search (education pages)",
+    "search_knowledge_base[clinic_policy]": "Knowledge base search (clinic policies)",
+    "search_knowledge_base[both]": "Knowledge base search (education pages and clinic policies)",
+}
+
 
 def call_api(method, path, payload=None):
     """Call the API. Returns (data, error_message); exactly one of them is None."""
@@ -63,6 +71,19 @@ def show_sources(sources):
 def show_text(text):
     """Show text with its line breaks kept."""
     st.markdown(text.replace("\n", "  \n"))
+
+
+def show_tools(tools_used):
+    """Show which checks the assistant ran for an answer, without repeats."""
+    if not tools_used:
+        st.caption("Checks run: none")
+        return
+    labels = []
+    for tool in tools_used:
+        label = TOOL_LABELS.get(tool, tool)
+        if label not in labels:
+            labels.append(label)
+    st.caption("Checks run: " + "; ".join(labels))
 
 
 def use_sample(text):
@@ -141,6 +162,8 @@ if report:
         reasons = []
         if safety["matched_phrases"]:
             reasons.append("matched phrases: " + ", ".join(safety["matched_phrases"]))
+        if safety.get("bp_readings"):
+            reasons.append("blood pressure reading above a crisis limit: " + ", ".join(safety["bp_readings"]))
         if safety["model_urgency"] == "emergency":
             reasons.append("the model rated it an emergency")
         st.error("EMERGENCY - act on this message now. Flagged because " + "; ".join(reasons) + ".")
@@ -172,6 +195,7 @@ if report:
         st.markdown(f"**Search text:** {report['query'] or 'none'}")
         st.markdown(f"**Safety check triggered by:** {safety['triggered_by']}")
         st.markdown(f"**Phrases matched by the rules:** {', '.join(safety['matched_phrases']) or 'none'}")
+        st.markdown(f"**Readings above a crisis limit:** {', '.join(safety.get('bp_readings', [])) or 'none'}")
         st.markdown(f"**Model's urgency rating:** {safety['model_urgency']}")
 
     # ---------- Follow-up chat ----------
@@ -182,6 +206,8 @@ if report:
     for turn in st.session_state["chat"]:
         with st.chat_message(turn["role"]):
             show_text(turn["content"])
+            if turn["role"] == "assistant":
+                show_tools(turn.get("tools_used", []))
             if turn.get("sources"):
                 with st.expander("Sources consulted"):
                     show_sources(turn["sources"])
@@ -202,8 +228,10 @@ if report:
         if error:
             st.error(error)
         else:
+            tools_used = result.get("tools_used", [])
             with st.chat_message("assistant"):
                 show_text(result["answer"])
+                show_tools(tools_used)
                 if result["sources"]:
                     with st.expander("Sources consulted"):
                         show_sources(result["sources"])
@@ -212,4 +240,4 @@ if report:
             st.session_state["history"].append({"role": "assistant", "content": result["answer"]})
             st.session_state["chat"].append({"role": "user", "content": question})
             st.session_state["chat"].append({"role": "assistant", "content": result["answer"],
-                                             "sources": result["sources"]})
+                                             "sources": result["sources"], "tools_used": tools_used})

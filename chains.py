@@ -161,31 +161,3 @@ report_step = RunnableLambda(build_report)
 
 triage_chain = analyze_step | safety_step | response_step | report_step
 
-def prepare(x):
-    chat_history = []
-    for entry in x['history']:
-        if entry['role'] == "user":
-            chat_history.append(HumanMessage(content = entry["content"]))
-        elif entry['role'] == "assistant":
-            chat_history.append(AIMessage(content = entry['content']))
-        else:
-            continue
-    topic = x['topic']
-    question = x['question']
-    query = topic + " " + question
-
-    docs = store.similarity_search(query, k = 4)
-
-    context = docs_to_context(docs)
-    sources = docs_to_sources(docs)
-
-    return {"question": question, "chat_history":chat_history, "context":context, "sources":sources}
-
-prepare_step = RunnableLambda(prepare)
-
-answer_step = RunnableParallel({
-    "answer": followup_prompt | model | parser,
-    "sources": (lambda x: x['sources'])
-})
-
-followup_chain = prepare_step | answer_step

@@ -85,7 +85,6 @@ def summarise_groups(results):
         groups[row['group']].append(row)
     return groups
 
-
 def save_csv(results,path):
     if not results:
         return 
