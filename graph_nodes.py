@@ -54,12 +54,16 @@ def info_reply(state: CaseState):
     reply = info_chain.invoke({"message": message, "context": context})
     return {"reply": reply, "path": "info_reply"}
 
-def nurse_review(state: CaseState):
+def make_review_payload(state: CaseState):
     sources = []
     for source in state['sources']:
-        if source['source_title'] not in sources:
-            sources.append(source['source_title'])
+            if source['source_title'] not in sources:
+                sources.append(source['source_title'])
     payload = {"message":state["message"], "summary": state['summary'], "intent": state['analysis'].intent, "urgency": state['analysis'].urgency, "draft": state['reply'], "sources": sources}
+    return payload
+
+def nurse_review(state: CaseState):
+    payload = make_review_payload(state)
     answer = interrupt(payload).strip()
     if answer.lower() == "approve":
         return {'review_decision': "approved"}

@@ -21,4 +21,4 @@ Thumbs.db
 # Streamlit local secrets
 .streamlit/secrets.toml
 
-cardiodesk.db
+cardiodesk.db.*
