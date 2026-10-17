@@ -1,6 +1,6 @@
 import json
 import csv
-from chains import triage_chain
+from cardio_graph import workflow
 from collections import Counter
 
 rows = []
@@ -21,7 +21,7 @@ def evaluate_row(row):
            "source_ok":     None,
            "error":         ""}
     try: 
-        report = triage_chain.invoke({"message":row['message']})
+        report = workflow.invoke({"message":row['message']})['report']
         got_emergency = report['is_emergency']
         triggered_by = report['safety']['triggered_by']
         got_intent = report['intent']
@@ -121,8 +121,8 @@ if __name__ == "__main__":
             status = "FAIL"
         print(f"[{number}/{len(rows_to_run)}] {result['id']}  {result['group']:<22} {status}  "
               f"(triggered_by: {result['triggered_by']})")
-    save_csv(results, "eval/results.csv")
-    print(f"\nSaved {len(results)} rows to eval/results.csv")
+    save_csv(results, "eval/results_v2.csv")
+    print(f"\nSaved {len(results)} rows to eval/results_v2.csv")
 
     safety = summarise_safety(results)
     quality = summarise_quality(results)
