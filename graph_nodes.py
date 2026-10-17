@@ -1,5 +1,6 @@
 from chains import analysis_chain, summary_chain, store, symptom_chain, info_chain, medication_chain, build_query, docs_to_context, docs_to_sources
 from graph_state import CaseState
+from langgraph.types import interrupt
 from safety import check_safety, EMERGENCY_MESSAGE
 
 def analyze(state: CaseState):
@@ -53,6 +54,18 @@ def info_reply(state: CaseState):
     reply = info_chain.invoke({"message": message, "context": context})
     return {"reply": reply, "path": "info_reply"}
 
+def nurse_review(state: CaseState):
+    sources = []
+    for source in state['sources']:
+        if source['source_title'] not in sources:
+            sources.append(source['source_title'])
+    payload = {"message":state["message"], "summary": state['summary'], "intent": state['analysis'].intent, "urgency": state['analysis'].urgency, "draft": state['reply'], "sources": sources}
+    answer = interrupt(payload).strip()
+    if answer.lower() == "approve":
+        return {'review_decision': "approved"}
+    else:
+        return {"reply": answer, "review_decision": "edited"}
+
 def build_report(state: CaseState):
     message = state['message']
     analysis= state['analysis']
@@ -70,9 +83,9 @@ def build_report(state: CaseState):
     red_flags = analysis.red_flags
     is_emergency = safety['is_emergency']
     draft_reply = state['reply']
-    needs_review = True
-
-    report = {"message": message, "summary": summary, "safety":safety, "path": path, "query": query, "filter_used": filter_used, "sources": sources, "patient_name": patient_name, "topic": topic, "intent": intent, "urgency": urgency, "red_flags": red_flags, "is_emergency": is_emergency, "draft_reply": draft_reply, "needs_review": needs_review}
+    review_decision = state.get("review_decision", "not_needed")
+    needs_review = False
+    report = {"message": message, "summary": summary, "safety":safety, "path": path, "query": query, "filter_used": filter_used, "sources": sources, "patient_name": patient_name, "topic": topic, "intent": intent, "urgency": urgency, "red_flags": red_flags, "is_emergency": is_emergency, "draft_reply": draft_reply, "review_decision": review_decision,"needs_review": needs_review}
 
     return {"report": report}
 
@@ -94,9 +107,39 @@ if __name__ == "__main__":
 
     report = build_report(state)["report"]
     v1_keys = {"message", "patient_name", "topic", "intent", "urgency", "red_flags", "summary", "is_emergency",
-               "safety", "path", "query", "filter_used", "sources", "draft_reply", "needs_review"}
+               "safety", "path", "query", "filter_used", "sources", "draft_reply", "needs_review", "review_decision"}
     print("ok  " if set(report) == v1_keys else "FAIL", f"report keys match v1 ({len(report)})")
+    
+    print("\n--- nurse_review (free, tiny graph) ---")
+    from langgraph.graph import StateGraph, START, END
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Command
+    from storage import serde
 
+    mini = StateGraph(CaseState)
+    mini.add_node("nurse_review", nurse_review)
+    mini.add_edge(START, "nurse_review")
+    mini.add_edge("nurse_review", END)
+    mini_graph = mini.compile(checkpointer=InMemorySaver(serde=serde))
+
+    start = {"message": "Is it safe to take ibuprofen while I am on warfarin? - Meera",
+             "analysis": MessageAnalysis(topic="warfarin", intent="medication_question", red_flags=[],
+                                         urgency="routine", patient_name="Meera"),
+             "summary": "Patient asks about ibuprofen with warfarin.",
+             "reply": "Hi Meera, please check with us before taking ibuprofen.",
+             "sources": [{"source_title": "MedlinePlus: Blood thinners", "section": "s", "url": "u"}]}
+    for thread, answer, want_decision, want_reply in [
+        ("t-approve", " approve ", "approved", "Hi Meera, please check with us before taking ibuprofen."),
+        ("t-edit", "Hi Meera, please avoid ibuprofen; a nurse will call you today.", "edited",
+         "Hi Meera, please avoid ibuprofen; a nurse will call you today."),
+    ]:
+        config = {"configurable": {"thread_id": thread}}
+        paused = mini_graph.invoke(start, config=config)
+        payload = paused["__interrupt__"][0].value
+        done = mini_graph.invoke(Command(resume=answer), config=config)
+        ok = done["review_decision"] == want_decision and done["reply"] == want_reply
+        print(f"{'ok  ' if ok else 'FAIL'} {thread:<10} payload intent {payload['intent']}, "
+              f"sources {payload['sources']} -> {done['review_decision']}")
     if len(sys.argv) > 1 and sys.argv[1] == "run":
         print("\n--- two real messages through the nodes (uses the model) ---")
         for message, reply_node in [

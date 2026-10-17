@@ -1,6 +1,6 @@
 import json
 import csv
-from cardio_graph import workflow
+from review_case import run
 from collections import Counter
 
 rows = []
@@ -15,13 +15,14 @@ def evaluate_row(row):
            "triggered_by":  "" ,
            "got_intent":    "" , 
            "got_path":      "" , 
+           "got_review_decision": "",
            "source_titles": [],
            "emergency_ok":  False,
            "intent_ok":     False,
            "source_ok":     None,
            "error":         ""}
     try: 
-        report = workflow.invoke({"message":row['message']})['report']
+        report = run(row['message'], auto_answer="approve")
         got_emergency = report['is_emergency']
         triggered_by = report['safety']['triggered_by']
         got_intent = report['intent']
@@ -44,6 +45,7 @@ def evaluate_row(row):
         result['triggered_by'] = triggered_by
         result['got_intent'] = got_intent
         result['got_path'] = got_path
+        result['got_review_decision'] = report['review_decision']
         result['source_titles'] = source_titles
         result['emergency_ok'] = emergency_ok
         result['intent_ok'] = intent_ok
@@ -85,6 +87,14 @@ def summarise_groups(results):
         groups[row['group']].append(row)
     return groups
 
+def summarise_review(results):
+    results = [row for row in results if not row['error']]
+    emergencies = [row for row in results if row['got_emergency']]
+    emerg_waited = [row for row in emergencies if row['got_review_decision'] != "not_needed"]
+    normal = [row for row in results if not row['got_emergency']]
+    normal_review = [row for row in normal if row['got_review_decision'] == "approved"]
+    return {"emergencies": emergencies, "emerg_waited":emerg_waited, "normal":normal, "normal_review": normal_review}
+
 def save_csv(results,path):
     if not results:
         return 
@@ -121,11 +131,12 @@ if __name__ == "__main__":
             status = "FAIL"
         print(f"[{number}/{len(rows_to_run)}] {result['id']}  {result['group']:<22} {status}  "
               f"(triggered_by: {result['triggered_by']})")
-    save_csv(results, "eval/results_v2.csv")
-    print(f"\nSaved {len(results)} rows to eval/results_v2.csv")
+    save_csv(results, "eval/results_v2_review.csv")
+    print(f"\nSaved {len(results)} rows to eval/results_v2_review.csv")
 
     safety = summarise_safety(results)
     quality = summarise_quality(results)
+    review = summarise_review(results)
     errors = [row for row in results if row["error"]]
 
     print("\nSAFETY")
@@ -137,6 +148,14 @@ if __name__ == "__main__":
 
     for row in safety["missed"]:
         print(f"\nMISSED {row['id']} ({row['group']}): {row['message']}")
+    print("\nREVIEW")
+    print(f"Emergencies that waited for a nurse:  {len(review['emerg_waited'])} of {len(review['emergencies'])}")
+    print(f"Normal drafts reviewed:               {len(review['normal_review'])} of {len(review['normal'])}")
+    for row in review["emerg_waited"]:
+        print(f"  WAITED {row['id']}: review_decision {row['got_review_decision']}")
+    for row in review["normal"]:
+        if row not in review["normal_review"]:
+            print(f"  NOT REVIEWED {row['id']}: review_decision {row['got_review_decision']}")
 
     intent_total = len(quality["intent_hits"]) + len(quality["intent_misses"])
     print("\nINTENT")
