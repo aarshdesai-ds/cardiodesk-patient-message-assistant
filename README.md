@@ -6,8 +6,13 @@ A retrieval-augmented (RAG) assistant that triages patient portal messages for a
 
 ---
 
+**Version 2** rebuilds the triage chain as a LangGraph graph. It makes nurse review a real step: every non-emergency draft now waits for a nurse, and emergency messages never wait. A new API keeps each case open between calls. See [Version 2: LangGraph and Nurse Review](#version-2-langgraph-and-nurse-review). Everything after that section describes version 1, which is kept unchanged in `chains.py` and behind the original `/triage` endpoint.
+
+---
+
 ## Table of Contents
 
+- [Version 2: LangGraph and Nurse Review](#version-2-langgraph-and-nurse-review)
 - [Overview](#overview)
 - [Design Questions](#design-questions)
 - [Knowledge Base](#knowledge-base)
@@ -21,6 +26,145 @@ A retrieval-augmented (RAG) assistant that triages patient portal messages for a
 - [Known Limitations](#known-limitations)
 - [Ideas for Extension](#ideas-for-extension)
 - [Data Source](#data-source)
+
+---
+
+## Version 2: LangGraph and Nurse Review
+
+In version 1, every report carried `needs_review: True`, but nothing stopped a draft from being used without a nurse. Version 2 enforces the review in the system itself, and makes sure an emergency is never delayed by it.
+
+All version 2 results use `gpt-4o-mini` at temperature 0, the same model as version 1.
+
+### The graph (`cardio_graph.py`)
+
+```
+                          START
+                 ┌──────────┴──────────┐
+              analyze              summarize            (run in parallel)
+                 └──────────┬──────────┘
+                       check_safety                     phrase rules + blood pressure rule + model urgency
+                            │
+                     route_by_safety
+            ┌───────────────┴───────────────┐
+        emergency                         normal
+            │                               │
+     emergency_reply                     retrieve       filtered by intent, as in version 1
+   (fixed message, no LLM)                  │
+            │                        route_by_intent
+            │            ┌──────────────────┼──────────────────┐
+            │      symptom_reply    medication_reply       info_reply
+            │            └──────────────────┼──────────────────┘
+            │                               ▼
+            │                         nurse_review           ⏸ waits for a nurse; state saved in SQLite
+            │                               │
+            └───────────────┬───────────────┘
+                     (never waits)
+                       build_report
+                            │
+                           END
+```
+
+| File | Role |
+|---|---|
+| `graph_state.py` | `CaseState`: the keys the nodes read and write |
+| `graph_nodes.py` | One function per node. They reuse the version 1 chains, prompts, retrieval helpers and `safety.py` unchanged |
+| `cardio_graph.py` | The two routers and the wiring. `build_graph(checkpointer)` returns the compiled graph |
+| `storage.py` | `SqliteSaver` on `cardiodesk.db`, and `config_for(case_id)` |
+| `review_case.py` | Runs one message from the terminal and asks the nurse when the graph pauses |
+
+### Step 1: the chain becomes a graph
+
+This was a refactor, so the target was no change. The 54-message test set was run through the graph and compared row by row with version 1's saved results:
+
+| 54 messages | Version 1 chain | Version 2 graph |
+|---|---|---|
+| Emergencies caught | 16 of 16 (both 8, rules 3, model 5) | 16 of 16 (both 8, rules 3, model 5) |
+| False alarms | 6 of 38 | 6 of 38 |
+| Intent | 53 of 54 | 53 of 54 |
+| Expected source retrieved | 30 of 31 | 30 of 31 |
+| **Rows that differ** | | **0 of 54** |
+
+Every row matched: emergency decision, which layer triggered it, intent, reply path and retrieval result. The emergency decision is now a visible router that reads only the safety check's result, and the emergency path has no model call after the check.
+
+### Step 2: nurse review that the graph enforces
+
+Every normal draft now passes through `nurse_review`, which calls `interrupt()` with what the nurse needs to see:
+
+```
+NURSE REVIEW (medication_question, urgency routine)
+Patient: Is it safe to take ibuprofen while I am on warfarin? - Meera
+Summary: Patient asks whether ibuprofen is safe with warfarin.
+Sources: MedlinePlus: Blood thinners, Riverbend Heart Clinic: Prescriptions and Refills
+Draft reply:
+  Hi Meera, ...
+Type 'approve' to send as is, or type a corrected reply:
+```
+
+The paused case is saved in `cardiodesk.db` under its own thread. "approve" keeps the draft, and any other text replaces it. The report records `review_decision` as `approved`, `edited` or `not_needed` (for emergencies).
+
+`emergency_reply` connects straight to `build_report`. A free test reads the compiled graph's edges and confirms that this is its only exit, so an emergency cannot reach `nurse_review`.
+
+The evaluation answers "approve" automatically and checks the pause against what the graph decided:
+
+| 54 messages | Result |
+|---|---|
+| Messages routed as emergencies | 22 (16 real, 6 false alarms) |
+| **Emergencies that waited for a nurse** | **0 of 22** |
+| Normal drafts reviewed | 32 of 32 |
+| Safety, intent and retrieval | Unchanged from step 1 |
+
+The pydantic `MessageAnalysis` object is kept in the state, so `safety.py` did not have to change. Saving it in a checkpoint needs the class on the serializer's allow-list. Without that, LangGraph warns that loading unregistered types will be blocked in a future version. `storage.py` registers it.
+
+### Step 3: an API that keeps cases open
+
+An API call cannot wait for a nurse, so the review is split across separate calls. The checkpointer holds each case in between, including across a server restart.
+
+| Endpoint | What it does |
+|---|---|
+| `POST /cases` | Starts a case from a patient message. It returns `waiting_for_nurse` with the review payload, or `done` with the report for an emergency |
+| `GET /cases/{case_id}` | Shows a case's current state. No model call |
+| `POST /cases/{case_id}/review` | The nurse's answer (`approve` or a corrected reply). It returns the finished report |
+
+| Situation | Response |
+|---|---|
+| Unknown case id | 404 |
+| A review sent to a case that is not waiting (an emergency, or a second review) | 409 |
+| An empty answer | 422 |
+| A model failure | 502 |
+
+The 409 matters. Without it, resuming a finished case would quietly start a new run on the same thread.
+
+All ten manual checks passed, through the `/docs` page:
+- unknown ids;
+- Meera's case created, read, read again after a server restart, approved, then refused a second review;
+- Raj's emergency finished on the first call and refused a review;
+- an empty answer rejected.
+
+The version 1 endpoints `/triage` and `/followup` are unchanged, so the Streamlit interface keeps working.
+
+### Run version 2
+
+```bash
+python review_case.py "Is it safe to take ibuprofen while I am on warfarin? - Meera"
+```
+
+```bash
+uvicorn api:app --reload
+```
+
+```bash
+python evaluate.py
+```
+
+`python graph_nodes.py` and `python cardio_graph.py` run free checks, including the wiring check. Add `run` to send two example messages through the model. `evaluate.py` now runs the version 2 graph and writes `eval/results_v2_review.csv`. The version 1 results file is unchanged.
+
+### What version 2 taught
+
+- **A review flag is not a review.** `needs_review: True` on every report looked safe and enforced nothing.
+- **Safety can be checked from the wiring.** Reading the compiled graph's edges proves that the emergency node has one exit, without running the model.
+- **Count the pause against the decision, not the labels.** "0 of 22 emergencies waited" checks the wiring. Whether those 22 should have been emergencies is the safety check's job, and it is measured separately.
+- **A refactor's best evidence is identical rows.** Matching totals can hide swapped rows. 54 of 54 identical rows cannot.
+- **A finished case must refuse a resume.** In an API, "nothing happened" is safer than "it started again".
 
 ---
 
@@ -230,14 +374,23 @@ cardiodesk-patient-message-assistant/
 ├── chains.py               # triage_chain
 ├── tools.py                # The agent's three tools
 ├── agent.py                # The follow-up agent: rules, the tool-calling loop, source tracking
-├── api.py                  # FastAPI service
-├── app.py                  # Streamlit interface
+├── api.py                  # FastAPI service: v1 /triage and /followup, v2 /cases endpoints
+├── app.py                  # Streamlit interface (version 1)
 │
-├── evaluate.py             # Runs the triage test set and reports the results
+├── graph_state.py          # v2: CaseState
+├── graph_nodes.py          # v2: the nodes, nurse_review, make_review_payload
+├── cardio_graph.py         # v2: routers and wiring; build_graph(checkpointer)
+├── storage.py              # v2: SqliteSaver on cardiodesk.db, config_for(), serializer allow-list
+├── review_case.py          # v2: one message from the terminal, with the nurse prompt
+├── cardiodesk.db           # Not committed: open and finished cases
+│
+├── evaluate.py             # Runs the triage test set through the v2 graph and reports the results
 ├── evaluate_agent.py       # Runs the follow-up agent test set and reports the results
 └── eval/
     ├── messages.jsonl          # 54 labelled synthetic patient messages
-    ├── results.csv             # Per-message results from the last triage run
+    ├── results.csv             # Per-message results from the version 1 triage run
+    ├── results_v2.csv          # Version 2 graph, step 1 (identical to results.csv row by row)
+    ├── results_v2_review.csv   # Version 2 with nurse review, step 2
     ├── followup.jsonl          # 25 labelled nurse questions
     └── followup_results.csv    # Per-question results from the last agent run
 ```
@@ -254,6 +407,8 @@ langchain-community
 langchain-openai
 langchain-chroma
 langchain-text-splitters
+langgraph
+langgraph-checkpoint-sqlite
 chromadb
 beautifulsoup4
 python-dotenv
@@ -279,7 +434,7 @@ An OpenAI API key is required. The project uses `gpt-4o-mini` for analysis and d
 
 2. Install dependencies:
    ```bash
-   pip install -r requirements.txt
+   python -m pip install -r requirements.txt
    ```
 
 3. Create a `.env` file in the project folder:
@@ -463,6 +618,18 @@ What this evaluation does not show:
 ---
 
 ## Known Limitations
+
+Version 2:
+
+- **False alarms skip the nurse.** The 6 messages wrongly flagged as emergencies get the fixed emergency message at once, and no nurse sees them, so their actual question goes unanswered. This was already true in version 1, but `needs_review: True` hid it. A fix that keeps the safety promise would send the fixed message immediately *and* add the case to a nurse's follow-up list.
+- **The nurse's edit is not checked.** Whatever text is sent replaces the draft. Only an empty answer is refused.
+- **The automatic "approve" in the evaluation measures the pause, not the nurse.** The scores are those of the drafts.
+- **Open cases are lost on a hosted redeploy.** `cardiodesk.db` is a local file. The hosted API's disk is wiped on each redeploy, so a case waiting there would disappear. A lasting deployment would need a persistent database.
+- **There is no list of waiting cases.** A nurse needs the case id to fetch a case.
+- **There is no authentication.** Anyone who can reach the API can approve a case.
+- **The version 2 results are one run each.**
+
+Version 1:
 
 - **Small, synthetic evaluations.** 54 labelled messages and 25 labelled nurse questions, written by the project's author, are enough to compare the two safety layers and to check tool routing, but too few to make claims about accuracy or safety in real use. Reply quality is not evaluated.
 - **The model under-rated three emergencies.** Fainting, breathlessness at rest and repeated blackouts were caught by the phrase rules only. Without the rules they would have gone to the normal reply path.
